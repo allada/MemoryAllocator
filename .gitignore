@@ -1,0 +1,6 @@
+/test/*
+!/test/gtest
+/test/gtest/*
+!/test/gtest/CMakeLists.txt
+!/test/CMakeLists.txt
+!/test/test.cpp
