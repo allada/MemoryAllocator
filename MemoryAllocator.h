@@ -3,7 +3,6 @@
 
 #include <atomic>
 #include <mutex>
-#include <array>
 
 // 2MB sized pages because most architectures/os's page memory in this size. This allows
 #define _ALLOCATOR_DEFAULT_BITS 21
@@ -14,18 +13,6 @@ private:
     static constexpr size_t BUCKET_MASK = BUCKET_SIZE - 1;
 
 public:
-
-// Needed for test, can be removed if never going to write/use tests for this.
-//#ifdef UNITTEST
-    friend class MemoryAllocatorTest;
-    ~MemoryBucket() {
-        if (deallocCallbackForTest) {
-            deallocCallbackForTest();
-        }
-    }
-    ::std::function<void()> deallocCallbackForTest;
-//#endif
-
     template <typename T>
     static T* nextPtr(size_t sz) {
         // Must always be even.
@@ -33,9 +20,6 @@ public:
             sz += 1;
         }
         MemoryBucket<SHIFT_BITS>* bucket = tipBucket_;
-
-//fprintf(stderr, "start: %p, sz: %lu\n", bucket->meta_.begin_ptr_, sz);
-
         bucket->meta_.used_count_.fetch_add(1);
         const uintptr_t basePtr = bucket->meta_.begin_ptr_;
         const size_t used_bytes = bucket->meta_.bytes_used_.fetch_add(sz);
@@ -43,10 +27,13 @@ public:
             tryNewBucket_(sz);
             return nextPtr<T>(sz);
         }
-        const uintptr_t endPtr = reinterpret_cast<uintptr_t>(bucket->data_.data()) + BUCKET_SIZE;
+        const uintptr_t endPtr = reinterpret_cast<uintptr_t>(&bucket->data_) + BUCKET_SIZE;
         const uintptr_t desiredPtr = basePtr + used_bytes;
+fprintf(stderr, "tipBucket: %p\n", bucket);
+fprintf(stderr, "basePtr: %p\n", basePtr);
+fprintf(stderr, "desiredPtr: %lx\n", desiredPtr);
+// fprintf(stderr, "Desired: %lu, start: %lu, used: %zu\n", desiredPtr, basePtr, used_bytes);
         bool isOverFence = bucket->meta_.is_over_fence_;
-fprintf(stderr, "%p %p\n", basePtr, bucket->meta_.begin_ptr_);
         if (desiredPtr + sz >= endPtr && !isOverFence) {
             {
                 // We do not use try_lock() here because it can return false with no lock being active.
@@ -75,7 +62,9 @@ fprintf(stderr, "%p %p\n", basePtr, bucket->meta_.begin_ptr_);
 
     template <typename T>
     static void freePtr(void* ptr) {
+fprintf(stderr, "withPtr: %p\n", ptr);
         MemoryBucket* bucket = *memoryBucketPointerFromPointer(ptr);
+fprintf(stderr, "bucketPtr: %p\n", bucket);
         size_t usedCount = bucket->meta_.used_count_.fetch_sub(1) - 1;
         if (usedCount == 0 && tipBucket_ != bucket) {
             delete bucket;
@@ -86,10 +75,9 @@ private:
 #endif
 
     MemoryBucket() {
-        uintptr_t ptr = reinterpret_cast<uintptr_t>(memoryBucketPointerFromPointer(data_.data()));
-        //*(reinterpret_cast<MemoryBucket**>(meta_.begin_ptr_)) = this;
-fprintf(stderr, "mm: %p\n", data_.data());
-        new(reinterpret_cast<void*>(ptr)) MetaData_(reinterpret_cast<uintptr_t>(data_.data()));
+        uintptr_t ptr = reinterpret_cast<uintptr_t>(memoryBucketPointerFromPointer(this));
+fprintf(stderr, "PTR: %p\n", ptr);
+        new(reinterpret_cast<void*>(ptr)) MetaData_(reinterpret_cast<uintptr_t>(this));
         // Offset by 1 to tell memoryBucketPointerFromPointer that it should go to right not left.
         constexpr uint8_t used = sizeof(MetaData_);
         constexpr uint8_t offset = (used & 0x1) ? 0 : 1;
@@ -117,10 +105,15 @@ fprintf(stderr, "mm: %p\n", data_.data());
         ::std::lock_guard<::std::mutex> lock(newAllocatorMux_);
         // We do another check here because between this function and the call point there may already
         // be a new bucket assigned. This will ensure we do not create a new bucket in such case.
+fprintf(stderr, "D: %d\n", __LINE__);
         if (tipBucket_->meta_.bytes_used_.load() + lastRequestSize < BUCKET_SIZE)
             return;
+fprintf(stderr, "D: %d\n", __LINE__);
         MemoryBucket<SHIFT_BITS>* previousTipBucket = tipBucket_;
+fprintf(stderr, "D: %d\n", __LINE__);
         tipBucket_ = new MemoryBucket<SHIFT_BITS>;
+fprintf(stderr, "NewTip: %p\n", tipBucket_);
+fprintf(stderr, "D: %d\n", __LINE__);
         // We do this here because it needs to be increased by 1 before we get into this function
         // for speed and race condition reasons.
         if (previousTipBucket->meta_.used_count_.fetch_sub(1) - 1 == 0) {
@@ -136,10 +129,22 @@ fprintf(stderr, "mm: %p\n", data_.data());
         ::std::atomic<int32_t> used_count_ = ATOMIC_VAR_INIT(0);
         bool is_over_fence_ = false;
         ::std::mutex over_fence_mux_;
+        ::std::function<void()> deallocCallbackForTest;
     };
 
+// Needed for test, can be removed if never going to write/use tests for this.
+//#ifdef UNITTEST
+    friend class MemoryAllocatorTest;
+    ~MemoryBucket() {
+fprintf(stderr, "Dealloc %p\n", this);
+        if (meta_.deallocCallbackForTest) {
+            meta_.deallocCallbackForTest();
+        }
+    }
+//#endif
+
     union {
-        ::std::array<uint8_t, BUCKET_SIZE> data_;
+        uint8_t data_[BUCKET_SIZE];
         MetaData_ meta_;
     };
 
